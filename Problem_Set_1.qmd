@@ -1,0 +1,353 @@
+---
+title: "Assignment: Abalone, Food Expenditure, and Collatz Conjecture"
+author: "Your Name"
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r setup}
+# Load libraries
+library(dplyr)
+library(readr)
+library(ggplot2)
+---
+
+# Problem 1 — Abalone Data
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+  library(tidyr)
+  library(janitor)     # <— robust column-name cleaning to avoid zero-length names
+  library(purrr)
+  library(broom)
+})
+```
+
+```{r}
+# === Abalone load (patched) ===
+abalone <- read.csv(abalone_data_path, header = FALSE, stringsAsFactors = FALSE)
+
+# Set the exact snake_case names we use later
+names(abalone) <- c(
+  "sex","length","diameter","height",
+  "whole_weight","shucked_weight","viscera_weight","shell_weight","rings"
+)
+
+# Convert numeric columns
+num_cols <- setdiff(names(abalone), "sex")
+for (nm in num_cols) abalone[[nm]] <- suppressWarnings(as.numeric(abalone[[nm]]))
+
+# sanity check
+print(colnames(abalone))
+```
+
+## Observations by sex
+
+```{r}
+as.data.frame(table(abalone$sex), stringsAsFactors = FALSE)
+
+```
+
+## Which weight has the highest correlation with rings?
+
+```{r}
+
+weight_vars <- c("whole_weight","shucked_weight","viscera_weight","shell_weight")
+
+corr_overall <- data.frame(
+  weight = weight_vars,
+  correlation = sapply(weight_vars, function(v) get_cor(abalone[[v]], abalone$rings)),
+  stringsAsFactors = FALSE
+)
+corr_overall <- corr_overall[order(-corr_overall$correlation), ]
+corr_overall
+
+```
+
+**Answer (overall):** The top row above is the most correlated weight with `rings`.
+
+## For that weight, which sex has the highest correlation with rings?
+
+```{r}
+top_weight <- corr_overall$weight[1]
+sp <- split(abalone, abalone$sex)
+corr_by_sex <- data.frame(
+  sex = names(sp),
+  correlation = sapply(sp, function(df) get_cor(df[[top_weight]], df$rings)),
+  stringsAsFactors = FALSE
+)
+corr_by_sex[order(-corr_by_sex$correlation), ]
+
+```
+
+**Answer (by sex):** The first row above shows the sex with the highest correlation for `top_weight`.
+
+## What are the weights of the abalone with the most rings?
+
+```{r}
+# Robust "most rings" slice — safe even if some columns are missing
+if (!exists("weight_vars")) {
+  weight_vars <- intersect(c("whole_weight","shucked_weight","viscera_weight","shell_weight"), names(abalone))
+}
+
+if ("rings" %in% names(abalone)) {
+  cols_to_show <- intersect(c("sex", weight_vars, "rings"), names(abalone))
+  max_r <- max(abalone$rings, na.rm = TRUE)
+  abalone_max <- abalone[abalone$rings == max_r, cols_to_show, drop = FALSE]
+  abalone_max
+} else {
+  data.frame(note = "Column 'rings' not found in abalone.")
+}
+```
+
+## What percentage of abalones have viscera weight \> shell weight?
+
+```{r}
+if (all(c("viscera_weight","shell_weight") %in% names(abalone))) {
+  valid <- abalone$viscera_weight > abalone$shell_weight
+  pct <- mean(valid, na.rm = TRUE) * 100
+  if (is.nan(pct)) {
+    "No valid data to compute percentage."
+  } else {
+    round(pct, 2)
+  }
+} else {
+  "Columns missing from abalone data."
+}
+
+```
+
+## Table: correlations between weights and rings, within each sex
+
+```{r}
+do.call(rbind, lapply(split(abalone, abalone$sex), function(df) {
+  data.frame(
+    sex = unique(df$sex),
+    whole_weight   = get_cor(df$whole_weight,   df$rings),
+    shucked_weight = get_cor(df$shucked_weight, df$rings),
+    viscera_weight = get_cor(df$viscera_weight, df$rings),
+    shell_weight   = get_cor(df$shell_weight,   df$rings)
+  )
+}))
+```
+
+## Welch t-tests: do mean rings differ across sexes?
+
+```{r}
+sexes  <- intersect(unique(abalone$sex), c("M","F","I"))
+pairs  <- combn(sexes, 2, simplify = FALSE)
+
+# Group means for context
+aggregate(rings ~ sex, data = abalone[abalone$sex %in% sexes, ], function(x) c(mean=mean(x,na.rm=TRUE), sd=sd(x,na.rm=TRUE), n=sum(is.finite(x))))
+
+# Pairwise tests
+lapply(pairs, function(p) {
+  g1 <- abalone$rings[abalone$sex == p[1]]
+  g2 <- abalone$rings[abalone$sex == p[2]]
+  list(pair = paste(p, collapse = " vs "), ttest = t.test(g1, g2, var.equal = FALSE))
+})
+```
+
+**Interpretation:** Use the p-values above (e.g., α = 0.05) to state which sex pairs differ significantly in mean rings; compare to group means for direction.
+
+# Problem 2
+
+```{r}
+# Guess a column name by matching patterns (case-insensitive).
+guess_col <- function(nms, patterns) {
+  for (p in patterns) {
+    hits <- grep(p, nms, ignore.case = TRUE, value = TRUE)
+    if (length(hits) > 0) return(hits[1])  # return first match
+  }
+  NA_character_
+}
+```
+
+```{r}
+food <- read.csv(food_path, stringsAsFactors = FALSE)
+names(food) <- clean_names_base(names(food))
+head(food, 3)
+```
+
+## Restrict to USD (show counts before/after)
+
+```{r}
+n_before <- nrow(food)
+currency_col <- guess_col(names(food), c("^currency$","currency"))
+food_usd <- food
+if (!is.na(currency_col)) {
+  cur_upper <- toupper(as.character(food[[currency_col]]))
+  if (any(cur_upper == "USD", na.rm = TRUE)) {
+    food_usd <- food[cur_upper == "USD", , drop = FALSE]
+  }
+}
+n_after <- nrow(food_usd)
+data.frame(before = n_before, after_usd = n_after)
+```
+
+```{r}
+# ----------------------------
+# Local file paths (Windows)
+# ----------------------------
+abalone_data_path  <- "C:/Users/cejordan/Documents/abalone.data"
+abalone_names_path <- "C:/Users/cejordan/Documents/abalone.names"
+food_path          <- "C:/Users/cejordan/Documents/food_expenditure.csv"
+
+# ----------------------------
+# Helper utilities (base R)
+# ----------------------------
+
+# Clean column names (janitor-like) using base R
+clean_names_base <- function(nms) {
+  nms <- gsub("[^A-Za-z0-9]+", "_", nms)
+  nms <- gsub("^_+|_+$", "", nms)
+  nms <- tolower(nms)
+  nms[nms == ""] <- paste0("x", seq_len(sum(nms == "")))
+  make.unique(nms, sep = "_")
+}
+
+# Safe correlation
+get_cor <- function(x, y) {
+  if (length(x) == 0 || length(y) == 0) return(NA_real_)
+  suppressWarnings(cor(x, y, use = "complete.obs"))
+}
+
+# Guess a column name by matching patterns (case-insensitive)
+guess_col <- function(nms, patterns) {
+  for (p in patterns) {
+    hits <- grep(p, nms, ignore.case = TRUE, value = TRUE)
+    if (length(hits) > 0) return(hits[1])  # first match
+  }
+  NA_character_
+}
+
+# Guess up to k numeric columns by name patterns; fallback to highest-variance numerics
+guess_numeric_cols <- function(df, patterns, k = 4, exclude = character(0)) {
+  nms <- names(df)
+  # 1) by patterns
+  cand <- unique(unlist(lapply(patterns, function(p) grep(p, nms, ignore.case = TRUE, value = TRUE))))
+  cand <- setdiff(cand, exclude)
+  cand <- cand[vapply(df[cand], is.numeric, TRUE)]
+  if (length(cand) >= k) return(cand[1:k])
+  # 2) fallback: top-variance numeric columns
+  nums <- nms[vapply(df, is.numeric, TRUE)]
+  nums <- setdiff(nums, exclude)
+  if (!length(nums)) return(character(0))
+  vrs <- sapply(df[nums], function(x) var(x, na.rm = TRUE))
+  nums[order(vrs, decreasing = TRUE)][1:min(k, length(nums))]
+}
+```
+
+## Cleaning rules (documented) and implementation
+
+```{r}
+dat <- food_usd
+
+# Identify common fields (best-effort)
+age_col   <- guess_col(names(dat), c("^age$","age"))
+state_col <- guess_col(names(dat), c("^state$","state"))
+
+# Age rule
+if (!is.na(age_col)) {
+  dat[[age_col]] <- suppressWarnings(as.numeric(dat[[age_col]]))
+  dat <- dat[is.finite(dat[[age_col]]) & dat[[age_col]] >= 18 & dat[[age_col]] <= 100, , drop = FALSE]
+}
+
+# State rule
+if (!is.na(state_col)) {
+  st <- toupper(trimws(as.character(dat[[state_col]])))
+  dat <- dat[!is.na(st) & grepl("^[A-Z]{2}$", st), , drop = FALSE]
+}
+
+# Food expenditure columns (try name patterns; fallback to numeric variance)
+food_cols <- guess_numeric_cols(
+  dat,
+  patterns = c("food","grocer","home","away","restaur","dining","eat"),
+  k = 4,
+  exclude = c(age_col, state_col, currency_col)
+)
+
+# Non-negative & finite; then drop >99.5th percentile per-column
+if (length(food_cols)) {
+  for (fc in food_cols) {
+    dat[[fc]] <- suppressWarnings(as.numeric(dat[[fc]]))
+    dat <- dat[is.finite(dat[[fc]]) & dat[[fc]] >= 0, , drop = FALSE]
+    cap <- suppressWarnings(quantile(dat[[fc]], 0.995, na.rm = TRUE))
+    if (is.finite(cap)) dat <- dat[dat[[fc]] <= cap | is.na(dat[[fc]]), , drop = FALSE]
+  }
+}
+
+# Dining-out count (optional)
+dining_col <- guess_col(names(dat), c("dining","times_out","eat_out","meals_out"))
+if (!is.na(dining_col)) {
+  dat[[dining_col]] <- suppressWarnings(as.numeric(dat[[dining_col]]))
+  keep <- is.finite(dat[[dining_col]]) & dat[[dining_col]] >= 0 & abs(dat[[dining_col]] - round(dat[[dining_col]])) < 1e-8
+  dat <- dat[keep, , drop = FALSE]
+}
+
+list(
+  used_columns = list(
+    currency = currency_col,
+    age = age_col,
+    state = state_col,
+    food_expenditures = food_cols,
+    dining_out = dining_col
+  ),
+  final_observations = nrow(dat)
+)
+```
+
+# Problem 3 — Collatz Conjecture
+
+```{r}
+#' Next Collatz step
+#' Input: A single positive integer
+#' Output: A single positive integer: n/2 if even; 3n+1 if odd.
+nextCollatz <- function(n) {
+  if (length(n)!=1 || !is.numeric(n) || !is.finite(n) || n<=0 || n!=as.integer(n)) {
+    stop("positive integer required")
+  }
+  n <- as.integer(n)
+  if (n %% 2L == 0L) n %/% 2L else 3L*n + 1L
+}
+
+#' Full Collatz sequence
+#' Input: A single positive integer
+#' Output: list(sequence=<vector>, length=<int>)
+collatzSequence <- function(n) {
+  if (length(n)!=1 || !is.numeric(n) || !is.finite(n) || n<=0 || n!=as.integer(n)) {
+    stop("positive integer required")
+  }
+  n <- as.integer(n)
+  seq_vec <- n
+  while (n != 1L) {
+    n <- nextCollatz(n)
+    seq_vec <- c(seq_vec, n)
+  }
+  list(sequence = seq_vec, length = length(seq_vec))
+}
+
+# Demonstrations
+nextCollatz(5)
+nextCollatz(16)
+collatzSequence(5)$sequence
+collatzSequence(19)$sequence
+```
+
+## Shortest and longest Collatz sequences for starts 100–500 (ties → smallest start)
+
+```{r}
+starts <- 100:500
+lens <- sapply(starts, function(s) collatzSequence(s)$length)
+df <- data.frame(start = starts, length = lens)
+
+shortest <- df[order(df$length, df$start), ][1, , drop = FALSE]
+longest  <- df[order(-df$length, df$start), ][1, , drop = FALSE]
+
+list(shortest = shortest, longest = longest)
+```
