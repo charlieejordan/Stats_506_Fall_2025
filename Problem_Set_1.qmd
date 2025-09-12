@@ -1,0 +1,479 @@
+---
+title: "Problem Set 1"
+author: "Charlie Jordan"
+format:
+  html:
+    self-contained: true
+    embed-resources: true 
+    code-fold: true
+    fig-format: png
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r setup}
+
+# Files
+
+abalone_data_path <- "https://raw.githubusercontent.com/charlieejordan/Stats_506_Fall_2025/main/abalone.data"
+food_path         <- "https://raw.githubusercontent.com/charlieejordan/Stats_506_Fall_2025/main/food_expenditure.csv"
+
+clean_names_base <- function(nms) {
+  nms <- gsub("[^A-Za-z0-9]+", "_", nms)
+  nms <- gsub("^_+|_+$", "", nms)
+  nms <- tolower(nms)
+  nms[nms == ""] <- paste0("x", seq_len(sum(nms == "")))
+  make.unique(nms, sep = "_")
+}
+
+safe_cor <- function(x, y) {
+  x <- suppressWarnings(as.numeric(x))
+  y <- suppressWarnings(as.numeric(y))
+  if (!length(x) || !length(y)) return(NA_real_)
+  if (all(!is.finite(x)) || all(!is.finite(y))) return(NA_real_)
+  suppressWarnings(stats::cor(x, y, use = "complete.obs"))
+}
+
+guess_col <- function(nms, patterns) {
+  for (p in patterns) {
+    hits <- grep(p, nms, ignore.case = TRUE, value = TRUE)
+    if (length(hits) > 0) return(hits[1])
+  }
+  NA_character_
+}
+
+guess_numeric_cols <- function(df, patterns, k = 4, exclude = character(0)) {
+  nms <- names(df)
+  cand <- unique(unlist(lapply(patterns, function(p) grep(p, nms, ignore.case = TRUE, value = TRUE))))
+  cand <- setdiff(cand, exclude)
+  cand <- cand[vapply(df[cand], is.numeric, TRUE)]
+  if (length(cand) >= k) return(cand[1:k])
+  nums <- nms[vapply(df, is.numeric, TRUE)]
+  nums <- setdiff(nums, exclude)
+  if (!length(nums)) return(character(0))
+  vrs <- sapply(df[nums], function(x) var(x, na.rm = TRUE))
+  nums[order(vrs, decreasing = TRUE)][1:min(k, length(nums))]
+}
+```
+
+# Problem 1 — Abalone Data
+
+```{r}
+abalone <- read.csv(abalone_data_path, header = FALSE, stringsAsFactors = FALSE)
+names(abalone) <- c(
+  "sex","length","diameter","height",
+  "whole_weight","shucked_weight","viscera_weight","shell_weight","rings"
+)
+num_cols <- setdiff(names(abalone), "sex")
+for (nm in num_cols) abalone[[nm]] <- suppressWarnings(as.numeric(abalone[[nm]]))
+head(abalone, 5)
+
+```
+
+## Observations by sex
+
+```{r}
+as.data.frame(table(abalone$sex))
+```
+
+## Which weight has the highest correlation with rings?
+
+```{r}
+weight_vars <- c("whole_weight","shucked_weight","viscera_weight","shell_weight")
+
+corr_overall <- data.frame(
+  weight = weight_vars,
+  correlation = sapply(weight_vars, function(v) safe_cor(abalone[[v]], abalone$rings)),
+  stringsAsFactors = FALSE
+)
+corr_overall <- corr_overall[order(-corr_overall$correlation), ]
+corr_overall
+
+```
+
+**Answer:** The top row is the most correlated weight with rings.
+
+## For that weight, which sex has the highest correlation with rings?
+
+```{r}
+top_weight <- corr_overall$weight[which.max(corr_overall$correlation)]
+sp <- split(abalone, abalone$sex)
+data.frame(
+  sex = names(sp),
+  correlation = sapply(sp, function(df) safe_cor(df[[top_weight]], df$rings))
+)
+```
+
+**Answer:** The first row above shows the sex with the highest correlation for top weight.
+
+## What are the weights of the abalone with the most rings?
+
+```{r}
+cols_to_show <- c("sex", weight_vars, "rings")
+abalone[abalone$rings == max(abalone$rings, na.rm = TRUE), cols_to_show]
+
+```
+
+## What percentage of abalones have viscera weight \> shell weight?
+
+```{r}
+round(mean(abalone$viscera_weight > abalone$shell_weight, na.rm = TRUE) * 100, 2)
+
+```
+
+## Correlations between weights and rings, by sex
+
+```{r}
+do.call(rbind, lapply(split(abalone, abalone$sex), function(df) {
+  data.frame(
+    sex = unique(df$sex),
+    whole_weight   = safe_cor(df$whole_weight,   df$rings),
+    shucked_weight = safe_cor(df$shucked_weight, df$rings),
+    viscera_weight = safe_cor(df$viscera_weight, df$rings),
+    shell_weight   = safe_cor(df$shell_weight,   df$rings)
+  )
+}))
+```
+
+## Table: correlations between weights and rings, within each sex
+
+```{r}
+do.call(rbind, lapply(split(abalone, abalone$sex), function(df) {
+  data.frame(
+    sex = unique(df$sex),
+    whole_weight   = safe_cor(df$whole_weight,   df$rings),
+    shucked_weight = safe_cor(df$shucked_weight, df$rings),
+    viscera_weight = safe_cor(df$viscera_weight, df$rings),
+    shell_weight   = safe_cor(df$shell_weight,   df$rings)
+  )
+}))
+
+```
+
+## T-tests: do mean rings differ across sexes?
+
+```{r}
+# ---- t-tests  ----
+
+# 1) Make a standardized copy of abalone with lower_snake_case names
+ab <- abalone
+std_names <- function(x){
+  x <- tolower(x)
+  x <- gsub("[^a-z0-9]+", "_", x)
+  x <- gsub("^_|_$", "", x)
+  gsub("_+", "_", x)
+}
+names(ab) <- std_names(names(ab))
+
+# 2) Verify required columns exist (sex, rings)
+req <- c("sex","rings")
+missing <- setdiff(req, names(ab))
+if (length(missing) > 0) {
+  stop(sprintf("Required columns not found after standardization: %s\nHave: %s",
+               paste(missing, collapse=", "),
+               paste(names(ab), collapse=", ")))
+}
+
+# 3) Helper: Cohen's d (Hedges g correction)
+cohens_d <- function(x, g){
+  g <- droplevels(as.factor(g))
+  if (nlevels(g) != 2) stop("cohens_d needs exactly two groups.")
+  x1 <- x[g == levels(g)[1]]; x2 <- x[g == levels(g)[2]]
+  m1 <- mean(x1); m2 <- mean(x2)
+  s1 <- var(x1);  s2 <- var(x2)
+  n1 <- length(x1); n2 <- length(x2)
+  sp <- sqrt(((n1-1)*s1 + (n2-1)*s2) / (n1 + n2 - 2))
+  d  <- (m1 - m2) / sp
+  J  <- 1 - (3/(4*(n1+n2) - 9))
+  d*J
+}
+
+# 4) Run Welch t-tests for the three pairs
+pairs <- list(c("M","F"), c("M","I"), c("F","I"))
+
+tt_rows <- lapply(pairs, function(p){
+  subdat <- subset(ab, sex %in% p)
+  subdat$sex <- droplevels(as.factor(subdat$sex))
+
+  subdat$sex <- factor(subdat$sex, levels = p)
+  tt <- t.test(rings ~ sex, data = subdat)
+  d  <- cohens_d(subdat$rings, subdat$sex)
+  m1 <- mean(subdat$rings[subdat$sex == p[1]])
+  m2 <- mean(subdat$rings[subdat$sex == p[2]])
+  data.frame(
+    group1 = p[1],
+    group2 = p[2],
+    mean1  = m1,
+    mean2  = m2,
+    diff   = m2 - m1,
+    t      = unname(tt$statistic),
+    df     = unname(tt$parameter),
+    pval   = tt$p.value,
+    ci_lo  = tt$conf.int[1],
+    ci_hi  = tt$conf.int[2],
+    cohens_d = d,
+    sig_0_05 = ifelse(tt$p.value < 0.05, "Yes", "No"),
+    direction = ifelse(m2 > m1, paste(p[2],">",p[1]), paste(p[1],">",p[2]))
+  )
+})
+
+ttab <- do.call(rbind, tt_rows)
+ttab
+
+```
+
+```{r}
+apply(ttab, 1, function(row){
+  paste0(
+    "Comparing ", row["group1"], " vs ", row["group2"], ": mean rings = ",
+    sprintf("%.2f", as.numeric(row["mean1"])), " vs ",
+    sprintf("%.2f", as.numeric(row["mean2"])),
+    " (difference ", sprintf("%.2f", as.numeric(row["diff"])), "). ",
+    "Welch t(", sprintf("%.1f", as.numeric(row["df"])), ") = ",
+    sprintf("%.2f", as.numeric(row["t"])), ", p = ",
+    format(as.numeric(row["pval"]), digits = 3),
+    ". 95% CI [", sprintf("%.2f", as.numeric(row["ci_lo"])), ", ",
+    sprintf("%.2f", as.numeric(row["ci_hi"])), "]. ",
+    "Cohen's d = ", sprintf("%.2f", as.numeric(row["cohens_d"])), ". ",
+    if (row["sig_0_05"] == "Yes")
+      paste0("There is evidence of a difference (", row["direction"], ").")
+    else
+      "No statistically significant difference at α = 0.05."
+  )
+})
+```
+
+```{r}
+sexes  <- unique(abalone$sex)
+pairs  <- combn(sexes, 2, simplify = FALSE)
+lapply(pairs, function(p) {
+  g1 <- abalone$rings[abalone$sex == p[1]]
+  g2 <- abalone$rings[abalone$sex == p[2]]
+  list(pair = paste(p, collapse = " vs "), ttest = t.test(g1, g2))
+})
+```
+
+**Interpretation of t-tests:**\
+
+The t-tests show differences in mean ring counts:
+
+Male vs. Female: different mean rings (p \< 0.05). Females have slightly higher counts
+
+Male vs. Infant: Males show higher mean rings on average
+
+Female vs. Infant: Females have the largest counts.
+
+The differences are large enough to be statistically meaningful.
+
+# Problem 2
+
+```{r}
+# --- Problem 2 — Food Expenditure  ---
+suppressPackageStartupMessages(library(dplyr))
+
+# 1) Import
+food_raw <- read.csv("food_expenditure.csv", na.strings = c("", "NA"))
+
+# 2) Rename to simple names (matches headers)
+food <- food_raw %>%
+  rename(
+    id                = ID,
+    age               = What.is.your.age.,
+    hh_nonself        = How.many.individuals.live.in.your.household.for.which.you.are.responsible.for.food.expenditures..excluding.yourself..,
+    state             = What.state.do.you.live.in.,
+    currency          = What.currency.are.you.reporting.your.food.expenditures.in.,
+    total             = What.was.your.total.food.expenditure.in.the.last.week.,
+    grocery           = What.was.your.total.food.expenditures.at.grocery.stores.in.the.last.week.,
+    dining_out_spend  = What.was.your.food.expenditure.while.dining.out.in.the.last.week.,
+    misc              = What.was.your.food.expenditure..miscellaneous..in.the.last.week.,
+    dining_out_times  = How.many.times.did.you.dine.out.last.week.,
+    include_alcohol   = Are.you.including.alcohol.in.your.food.expenditures.,
+    assistance        = What.food.assistance.programs..if.any..did.you.use.for.your.food.expenditures.last.week.
+  )
+
+# 3) USD filter & counts
+n_before_currency <- nrow(food)
+food <- food %>% filter(!is.na(currency), toupper(currency) == "USD")
+n_after_currency  <- nrow(food)
+
+# 4) Cleaning
+as_num <- function(x) suppressWarnings(as.numeric(x))
+valid_states <- c(
+  "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD",
+  "MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC",
+  "SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC","PR"
+)
+
+food <- food %>%
+  mutate(
+    age              = as_num(age),
+    total            = as_num(total),
+    grocery          = as_num(grocery),
+    dining_out_spend = as_num(dining_out_spend),
+    misc             = as_num(misc),
+    dining_out_times = as_num(dining_out_times)
+  )
+
+# AGE 18–100
+n1_before <- nrow(food)
+food <- food %>% filter(!is.na(age), age >= 18, age <= 100)
+n1_after  <- nrow(food)
+
+# STATE valid 2-letter
+n2_before <- nrow(food)
+food <- food %>%
+  mutate(state = toupper(trimws(state))) %>%
+  filter(!is.na(state), grepl("^[A-Z]{2}$", state), state %in% valid_states)
+n2_after  <- nrow(food)
+
+# EXPENDITURES: non-neg + caps (weekly)
+n3_before <- nrow(food)
+food <- food %>%
+  filter(
+    !is.na(total)            & total            >= 0 & total            <= 2000,
+    !is.na(grocery)          & grocery          >= 0 & grocery          <= 1000,
+    !is.na(dining_out_spend) & dining_out_spend >= 0 & dining_out_spend <= 1000,
+    !is.na(misc)             & misc             >= 0 & misc             <= 1000
+  )
+n3_after <- nrow(food)
+
+# DINING-OUT TIMES: integer-like 0–35
+n4_before <- nrow(food)
+food <- food %>%
+  filter(!is.na(dining_out_times), dining_out_times >= 0, dining_out_times <= 35) %>%
+  filter(abs(dining_out_times - round(dining_out_times)) < 1e-8) %>%
+  mutate(dining_out_times = as.integer(round(dining_out_times)))
+n4_after <- nrow(food)
+
+# 5) Before/after table & final N
+cleaning_counts <- data.frame(
+  step = c("USD subset start","After AGE 18–100","After valid STATE","After spend caps","After dining-out 0–35 (integer)"),
+  kept = c(n_after_currency, n1_after, n2_after, n3_after, n4_after)
+)
+cleaning_counts
+
+cat("\nFINAL NUMBER OF OBSERVATIONS AFTER CLEANING:", nrow(food), "\n")
+
+# consistency check
+residual <- with(food, total - (grocery + dining_out_spend + misc))
+summary(residual)
+
+```
+
+After restricting to respondents reporting in USD, four cleaning steps are applied:
+
+Minors and implausible ages are excluded by keeping only respondents aged 18–100.
+
+The state variable is limited to valid two-letter postal codes (50 states plus DC and PR).
+
+Entries with negative or extreme weekly food expenditures are removed: total ≤ \$2000, and grocery/dining/miscellaneous components each ≤ \$1000.
+
+Dining-out counts are required to be integers between 0 and 35 to remove outliers and non-integer values.
+
+The final dataset totals 130.
+
+# Problem 3 — Collatz Conjecture
+
+```{# --- Problem 3 — Collatz Conjecture (self-contained & documented) ---}
+
+#' Next step in the Collatz sequence
+#' @param n Positive integer (length 1)
+#' @return Next positive integer in the sequence
+#' @examples nextCollatz(5); nextCollatz(16)
+nextCollatz <- function(n) {
+  if (length(n) != 1 || !is.numeric(n) || is.na(n) || n <= 0 || n != as.integer(n)) {
+    stop("Input must be a positive integer (length 1).")
+  }
+  if (n %% 2 == 0) n / 2 else 3L * n + 1L
+}
+
+#' Generate Collatz sequence until it reaches 1
+#' @param n Positive integer (length 1)
+#' @return list: sequence (integer vector), length (integer)
+#' @examples collatzSequence(5)$sequence; collatzSequence(19)$sequence
+collatzSequence <- function(n) {
+  if (length(n) != 1 || !is.numeric(n) || is.na(n) || n <= 0 || n != as.integer(n)) {
+    stop("Input must be a positive integer (length 1).")
+  }
+  seq <- as.integer(n)
+  while (n != 1L) {
+    n <- nextCollatz(n)
+    seq <- c(seq, as.integer(n))
+  }
+  list(sequence = seq, length = length(seq))
+}
+
+# --- Reproduce examples ---
+stopifnot(nextCollatz(5) == 16, nextCollatz(16) == 8)
+collatzSequence(5)$sequence
+collatzSequence(19)$sequence
+
+# --- Search for shortest/longest ---
+starts <- 100:500
+lens <- sapply(starts, function(s) collatzSequence(s)$length)
+
+shortest_len   <- min(lens)
+shortest_start <- min(starts[lens == shortest_len])
+
+longest_len    <- max(lens)
+longest_start  <- min(starts[lens == longest_len])
+
+data.frame(
+  metric = c("shortest", "longest"),
+  start  = c(shortest_start, longest_start),
+  length = c(shortest_len,  longest_len)
+)
+
+```
+
+```{r}
+# Ensure functions exist (define only if missing)
+if (!exists("nextCollatz")) {
+  nextCollatz <- function(n) {
+    if (length(n)!=1 || !is.numeric(n) || is.na(n) || n<=0 || n!=as.integer(n))
+      stop("Input must be a positive integer (length 1).")
+    if (n %% 2 == 0) n/2 else 3L*n + 1L
+  }
+}
+if (!exists("collatzSequence")) {
+  collatzSequence <- function(n) {
+    if (length(n)!=1 || !is.numeric(n) || is.na(n) || n<=0 || n!=as.integer(n))
+      stop("Input must be a positive integer (length 1).")
+    seq <- as.integer(n)
+    while (n != 1L) { n <- nextCollatz(n); seq <- c(seq, as.integer(n)) }
+    list(sequence = seq, length = length(seq))
+  }
+}
+
+# Compute results for 100..500
+starts <- 100:500
+lens <- sapply(starts, function(s) collatzSequence(s)$length)
+
+shortest_len   <- min(lens)
+shortest_start <- min(starts[lens == shortest_len])
+
+longest_len    <- max(lens)
+longest_start  <- min(starts[lens == longest_len])
+
+# Show a small table
+data.frame(
+  metric = c("shortest","longest"),
+  start  = c(shortest_start, longest_start),
+  length = c(shortest_len,  longest_len)
+)
+
+# Print the narrative so prose matches numbers
+cat(sprintf(
+  "\nBetween 100 and 500, the shortest Collatz sequence starts at %d (length %d), while the longest starts at %d (length %d).\n",
+  shortest_start, shortest_len, longest_start, longest_len
+))
+
+```
+
+The Collatz sequence functions worked.
+
+The shortest sequence originated at 128 reaching 1 in a few steps.
+
+The longest sequence originated at 327, taking over 140 steps to reach 1. These results illustrate the conjecture’s unpredictable behavior: nearby starting values can yield very different path lengths, even though all eventually converge to 1.
