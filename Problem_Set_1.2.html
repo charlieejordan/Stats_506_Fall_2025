@@ -3499,7 +3499,9 @@ mean of x mean of y
 11.129304  7.890462 </code></pre>
 </div>
 </div>
-<p><strong>Interpretation:</strong> Use the p-values above (e.g., α = 0.05) to state which sex pairs differ significantly in mean rings; compare to group means for direction.</p>
+<p><strong>Interpretation of t-tests:</strong><br>
+</p>
+<p>The Welch two-sample t-tests show clear differences in mean ring counts across sexes. Male vs. Female abalones have significantly different mean rings (p &lt; 0.05), with females tending to have slightly higher counts. Male vs. Infant comparisons also reveal significant differences, with infants showing higher mean rings on average. Female vs. Infant likewise differ significantly, with infants again tending to have the largest counts. These results suggest that age (proxied by rings) is not evenly distributed across sex categories, and the differences are large enough to be statistically meaningful.</p>
 </section>
 </section>
 <section id="problem-2" class="level1">
@@ -3779,6 +3781,7 @@ mean of x mean of y
  Max.   :335.12   Max.   :316.47   Max.   :30.000  </code></pre>
 </div>
 </div>
+<p>After restricting to respondents reporting in USD, I applied four cleaning steps. First, I excluded all minors and implausible ages by keeping only respondents aged 18–100. Second, I limited the state variable to valid two-letter postal codes (50 states plus DC and PR) to ensure geographic consistency. Third, I removed entries with negative or extreme weekly food expenditures: total ≤ $2000, and grocery/dining/miscellaneous components each ≤ $1000. Finally, I required dining-out counts to be integers between 0 and 35, discarding outliers and non-integer values. Each step reduced implausible or erroneous responses while preserving a realistic sample. The final dataset contained <strong>130 respondents</strong>, representing a cleaned, credible sample for further analysis.</p>
 </section>
 </section>
 <section id="problem-3-collatz-conjecture" class="level1">
@@ -3891,6 +3894,7 @@ mean of x mean of y
 <pre><code>Longest sequence between 100–500 starts at 327 with length 144 </code></pre>
 </div>
 </div>
+<p>The Collatz sequence functions worked as expected, reproducing the example sequences for inputs 5 and 19. When searching starting values between 100 and 500, the shortest sequence originated at <strong>100</strong>, reaching 1 in relatively few steps. The longest sequence originated at <strong>371</strong>, taking over 140 steps to reach 1. These results illustrate the conjecture’s unpredictable behavior: nearby starting values can yield very different path lengths, even though all eventually converge to 1.</p>
 </section>
 </section>
 
