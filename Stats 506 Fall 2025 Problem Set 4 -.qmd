@@ -1,0 +1,350 @@
+---
+title: "Stats 506 – Fall 2025 Problem Set 4"
+author: "Charlie Jordan"
+format:
+  html:
+    code-fold: true
+    self-contained: true
+execute:
+  echo: true
+  warning: false
+  message: false
+params:
+  repo_url: "https://github.com/charlieejordan/Stats_506_Fall_2025"
+---
+
+## GitHub Repository
+**Repository:** `r params$repo_url`
+
+```{r}
+# Global setup for consistent knitting
+knitr::opts_chunk$set(comment = "#>", fig.width = 8, fig.height = 4.8)
+
+# Standard CRAN settings to ensure reproducibility
+options(repos = c(CRAN = "https://cloud.r-project.org"), download.file.method = "libcurl", timeout = 120)
+
+# Install any missing packages automatically
+install_if_missing <- function(pkgs) {
+  pkgs <- setdiff(pkgs, rownames(installed.packages()))
+  if (length(pkgs)) install.packages(pkgs, dependencies = TRUE)
+}
+
+# Core and task-specific libraries
+install_if_missing(c(
+  "tidyverse","janitor","stringr","lubridate","scales","knitr","readr",
+  "nzelect","infer","ggrepel","zoo","curl"
+))
+
+library(tidyverse); library(janitor); library(stringr); library(lubridate)
+library(scales); library(knitr); library(readr)
+library(nzelect); library(infer); library(ggrepel); library(zoo)
+
+cat(sprintf("**GitHub repository:** [%s](%s)", params$repo_url, params$repo_url))
+```
+
+---
+
+## Problem 1 – Tidyverse: New Zealand Elections
+
+```{r}
+data("nzge", package = "nzelect")
+nz <- nzge |> clean_names()
+glimpse(nz)
+```
+
+### Detecting Key Columns
+
+```{r}
+# Identify the column that records vote type (Candidate or Party)
+# Looks for text patterns and expected value names to detect the field automatically.
+detect_vote_type <- function(df) {
+  for (col in names(df)) {
+    v <- df[[col]]
+    if (is.character(v) || is.factor(v)) {
+      u <- unique(tolower(trimws(as.character(v))))
+      u <- u[!is.na(u)]
+      if (length(u) > 0 && all(u %in% c("candidate","party"))) return(col)
+    }
+  }
+  hit <- names(df)[str_detect(names(df), "vote.?type|votetype|(^|_)type($|_)")]
+  if (length(hit)) return(hit[[1]])
+  NA_character_
+}
+
+# Identify the column containing the election year
+# Uses name patterns or numeric range to locate the year variable.
+detect_year <- function(df) {
+  by_name <- names(df)[str_detect(names(df), "year")]
+  if (length(by_name)) return(by_name[[1]])
+  nums <- names(df)[vapply(df, is.numeric, logical(1))]
+  for (col in nums) {
+    v <- df[[col]]; if (all(is.na(v))) next
+    r <- range(v, na.rm = TRUE)
+    if (r[1] >= 1900 && r[2] <= 2100) return(col)
+  }
+  NA_character_
+}
+
+# Detect the party name column using typical labels or character variety
+detect_party <- function(df) {
+  by_name <- names(df)[str_detect(names(df), "party")]
+  if (length(by_name)) return(by_name[[1]])
+  chr <- names(df)[vapply(df, is.character, logical(1))]
+  if (length(chr)) {
+    k <- vapply(df[chr], function(x) n_distinct(x, na.rm = TRUE), integer(1))
+    return(chr[[which.max(k)]])
+  }
+  NA_character_
+}
+
+# Detect the column containing total votes
+# Chooses the numeric field with the largest sum if not clearly labeled.
+detect_votes <- function(df) {
+  by_name <- names(df)[str_detect(names(df), "vote")]
+  nums <- names(df)[vapply(df, is.numeric, logical(1))]
+  cand <- intersect(by_name, nums)
+  if (length(cand)) return(cand[[1]])
+  if (length(nums)) {
+    sums <- vapply(df[nums], function(x) sum(x[x > 0], na.rm = TRUE), numeric(1))
+    return(nums[[which.max(sums)]])
+  }
+  NA_character_
+}
+
+year_col  <- detect_year(nz)
+type_col  <- detect_vote_type(nz)
+party_col <- detect_party(nz)
+votes_col <- detect_votes(nz)
+
+nz_std <- nz |> rename(
+  year      = all_of(year_col),
+  vote_type = all_of(type_col),
+  party     = all_of(party_col),
+  votes     = all_of(votes_col)
+) |> mutate(
+  vote_type = str_to_title(vote_type),
+  party     = as.character(party)
+)
+```
+
+### Total Votes by Year and Type
+```{r}
+total_votes <- nz_std |>
+  group_by(year, vote_type) |>
+  summarise(total_votes = sum(votes, na.rm = TRUE), .groups = "drop") |>
+  arrange(desc(total_votes))
+
+kable(total_votes,
+      caption = "Total votes by year and vote type (sorted by total votes).",
+      digits = 0, format.args = list(big.mark = ","))
+```
+
+### Party Vote Share in 2014
+```{r}
+cand_2014 <- nz_std |>
+  filter(year == 2014, vote_type == "Candidate") |>
+  group_by(party) |>
+  summarise(candidate_votes = sum(votes, na.rm = TRUE), .groups = "drop") |>
+  mutate(share = candidate_votes / sum(candidate_votes)) |>
+  arrange(desc(share))
+
+kable(cand_2014 |> mutate(
+  candidate_votes = comma(candidate_votes),
+  share = percent(share, accuracy = 0.1)
+), col.names = c("Party", "Candidate Votes", "% of Candidate Vote"),
+caption = "2014 New Zealand general election — Candidate vote share by party.")
+
+top_row <- cand_2014 |> slice(1)
+cat(sprintf("
+**Answer:** In 2014, the %s party received the largest share of Candidate votes (%.1f%%).\n",
+            top_row$party, 100 * top_row$share))
+```
+
+### Election Winners by Year
+```{r}
+winners <- nz_std |>
+  group_by(year, vote_type, party) |>
+  summarise(total_votes = sum(votes, na.rm = TRUE), .groups = "drop") |>
+  group_by(year, vote_type) |>
+  slice_max(total_votes, n = 1, with_ties = FALSE) |>
+  pivot_wider(names_from = vote_type, values_from = party) |>
+  arrange(year)
+
+kable(winners, caption = "Yearly winners for Candidate and Party votes.")
+```
+
+---
+
+## Problem 2 – Tidyverse: Tennis (2019)
+
+```{r}
+library(infer)
+
+# Helper function to safely load the dataset from GitHub
+read_atp_2019 <- function(url) {
+  x <- try(read_csv(url, show_col_types = FALSE), silent = TRUE)
+  if (!inherits(x, "try-error")) return(x)
+  tf <- tempfile(fileext = ".csv")
+  if (requireNamespace("curl", quietly = TRUE)) {
+    curl::curl_download(url, tf, mode = "wb")
+  } else {
+    download.file(url, tf, mode = "wb", method = "libcurl", quiet = TRUE)
+  }
+  read_csv(tf, show_col_types = FALSE)
+}
+
+atp_url <- "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_2019.csv"
+matches <- read_atp_2019(atp_url) |> clean_names()
+stopifnot(all(c("tourney_id","tourney_name","round","winner_name","loser_name") %in% names(matches)))
+```
+
+### Number of Tournaments
+```{r}
+tournaments_2019 <- matches |> distinct(tourney_id, tourney_name)
+n_tourneys <- nrow(tournaments_2019)
+kable(head(tournaments_2019, 10), caption = "Sample of 2019 ATP tournaments.")
+cat(sprintf("\n**Answer:** There were %d ATP tournaments held in 2019.\n", n_tourneys))
+```
+
+### Players with Multiple Titles
+```{r}
+titles <- matches |>
+  filter(round == "F") |>
+  distinct(tourney_id, tourney_name, winner_name) |>
+  count(winner_name, name = "titles") |>
+  arrange(desc(titles))
+
+multi_winners <- titles |> filter(titles > 1)
+max_titles <- max(titles$titles, na.rm = TRUE)
+players_max <- titles |> filter(titles == max_titles)
+
+kable(head(titles, 15), caption = "Top players by number of tournament titles in 2019.")
+cat(sprintf("\n**Answer:** %d player(s) won more than one tournament; the highest total was %d (%s).\n",
+            nrow(multi_winners), max_titles, paste(players_max$winner_name, collapse = ", ")))
+```
+
+### Do Winners Serve More Aces?
+```{r}
+aces <- matches |>
+  select(w_ace, l_ace) |>
+  drop_na()
+
+aces_long <- bind_rows(
+  tibble(aces = aces$w_ace, role = "Winner"),
+  tibble(aces = aces$l_ace, role = "Loser")
+)
+
+obs_diff <- aces_long |>
+  specify(aces ~ role) |>
+  calculate(stat = "diff in means", order = c("Winner", "Loser"))
+
+p_val <- aces_long |>
+  specify(aces ~ role) |>
+  hypothesize(null = "independence") |>
+  generate(reps = 3000, type = "permute") |>
+  calculate(stat = "diff in means", order = c("Winner", "Loser")) |>
+  get_p_value(obs_stat = obs_diff, direction = "two_sided")
+
+cat(sprintf("\n**Answer:** On average, winners served %.2f more aces than losers (p = %.4f).\n",
+            obs_diff$stat, p_val$p_value))
+```
+
+### Highest Win Rate (≥5 Matches)
+```{r}
+winrate <- matches |>
+  select(winner_name, loser_name) |>
+  pivot_longer(everything(), names_to = "result", values_to = "player") |>
+  mutate(is_win = if_else(result == "winner_name", 1L, 0L)) |>
+  group_by(player) |>
+  summarise(matches = n(), wins = sum(is_win), win_rate = wins / matches, .groups = "drop") |>
+  filter(matches >= 5) |>
+  arrange(desc(win_rate), desc(wins))
+
+kable(head(winrate, 10), caption = "Top 10 players by win rate (minimum 5 matches).")
+best <- winrate |> slice(1)
+cat(sprintf("\n**Answer:** The highest win rate was %.1f%% by %s (minimum 5 matches).\n",
+            100 * best$win_rate, best$player))
+```
+
+---
+
+## Problem 3 – COVID-19 Data Visualization
+
+```{r}
+covid <- read_csv("https://raw.githubusercontent.com/nytimes/covid-19-data/master/rolling-averages/us-states.csv",
+                  show_col_types = FALSE) |> mutate(date = as_date(date))
+```
+
+### (a) Identifying Major and Minor Spikes
+```{r}
+nat <- covid |>
+  group_by(date) |>
+  summarise(cases_avg = sum(cases_avg, na.rm = TRUE), .groups = "drop") |>
+  mutate(z = (cases_avg - mean(cases_avg)) / sd(cases_avg),
+         spike = case_when(z >= 3 ~ "Major", z >= 1.5 ~ "Minor", TRUE ~ NA_character_))
+
+ggplot(nat, aes(date, cases_avg)) +
+  geom_line() +
+  geom_point(data = filter(nat, !is.na(spike)), aes(color = spike)) +
+  labs(title = "National COVID-19 Case Spikes (7-day average)",
+       y = "New cases (7-day avg)", x = NULL) +
+  theme_minimal(base_size = 14)
+
+
+```
+### Conclusion: Major spikes (z ≥ 3) align with the largest national waves, while minor spikes (1.5 ≤ z < 3) appear between them.
+
+
+### (b) Comparing Highest vs Lowest States
+```{r}
+mean_rates <- covid |>
+  group_by(state) |>
+  summarise(mean_rate = mean(cases_avg_per_100k, na.rm = TRUE)) |>
+  arrange(desc(mean_rate))
+
+hi <- first(mean_rates$state); lo <- last(mean_rates$state)
+
+covid_subset <- covid |> filter(state %in% c(hi, lo))
+
+ggplot(covid_subset, aes(date, cases_avg_per_100k, color = state)) +
+  geom_line() +
+  labs(title = "Trajectories for States with Highest and Lowest COVID Rates",
+       y = "Cases per 100k (7-day avg)", x = NULL) +
+  theme_minimal(base_size = 14)
+
+
+```
+###Conclusion: The highest-rate state shows sustained and volatile case trends, whereas the lowest-rate state remains relatively stable over time.
+
+
+### (c) Earliest States to Experience Substantial Cases
+```{r}
+first5 <- covid |>
+  group_by(state) |>
+  filter(cases_avg_per_100k >= 5) |>
+  summarise(first_date = min(date), .groups = "drop") |>
+  arrange(first_date) |>
+  slice(1:5)
+
+ggplot(filter(covid, state %in% first5$state), aes(date, cases_avg_per_100k, color = state)) +
+  geom_line() +
+  geom_vline(data = first5, aes(xintercept = as.numeric(first_date)), linetype = 2) +
+  labs(title = "Earliest Five States to Reach 5 Cases per 100k (7-day avg)",
+       y = "Cases per 100k (7-day avg)", x = NULL) +
+  theme_minimal(base_size = 14)
+
+
+```
+### Conclusion: The first five states to reach substantial activity were primarily coastal or highly connected regions, consistent with early transmission patterns.
+
+---
+
+## Sources & Attribution
+
+- **New Zealand elections:** `nzelect` package (dataset `nzge`)  
+- **Tennis (ATP 2019):** Jeff Sackmann’s public dataset from the *tennis_atp* repository  
+- **COVID-19:** The New York Times rolling-averages dataset (`us` and `us-states`)  
+
+### Methods Notes
+- *Problem 2:* Used a two-sided permutation test (`infer`) comparing aces by winners vs losers.  
+- *Problem 3:* Defined spikes using z-scores of 7-day averages; earliest states determined by first date exceeding 5 cases per 100k.
